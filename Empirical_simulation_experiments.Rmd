@@ -1,0 +1,327 @@
+---
+title: "Empirical simulation experiments"
+output: html_document
+---
+
+# Loading some packages and additional scripts
+```{r}
+source("function.R")
+library(lfmm)
+library(cate)
+library(glmnet)
+library(sva)
+library(naturalgwas) ## devtools::install_github("bcm-uga/naturalgwas")
+library(tidyverse)
+library(reshape2)
+```
+
+
+# Creating simulated data sets from empirical data and evaluating methods 
+
+This section reproduces the experiments described in the section "Empirical simulation experiments" of the manuscript.
+
+Empirical simulations are based on empirical genotype data for the model plant *Arabidopsis thaliana* from (Atwell et al. 2010). An artificial dependent variable, or phenotype, is simulated from five causal quantitative trait loci (causal loci).  
+
+## Loading the data and setting simulation parameters
+
+The data were loaded from the R package **naturalgwas**.
+
+```{r}
+
+## Genotypic data for Arabidopsis thaliana (Atwell et al. 2010)
+data(A.thaliana)
+genotype <- A.thaliana$genotype
+
+# Genetic map: positions of loci on chromosomes 
+chrpos <- A.thaliana$chrpos
+
+# geographic coordinates for each individual
+coordinates <- A.thaliana$coord
+
+# number of individuals
+n <- nrow(genotype)
+
+# Number of genetic markers (SNPs)
+p <- ncol(genotype)
+
+# Number of latent factors
+k <- 6
+
+# Number of causal genotypes/markers
+n.causal <- 5
+
+# proportion of causal genotypes/markers
+pc <- n.causal/p
+
+# Effect sizes for causal genotypes/markers
+# The number of repetitions corresponds to the number of experiments (x2)
+# Warning: some methods may take very long time when the number of 
+# repetitions is large (below, 300)
+# eff <- rep(c(6, 9), 300)
+eff <- rep(c(6, 9), 1)
+
+# intensity of gene x environment interaction (between 0 and 1)
+gxe <- c(0.1, 0.9)
+
+para <- expand.grid(gxe, eff)
+colnames(para) <- c("gxe", "eff")
+
+# Number of simulations
+nb <- nrow(para)
+
+# Performance matrices computed on the top 25 hits in association studies
+f1_5 <- matrix(NA, nrow = nb, ncol = 6) # F1-score 
+preci_5 <- matrix(NA, nrow = nb, ncol = 6) # Precision (1 - False Discovery Rate)
+recal_5 <- matrix(NA, nrow = nb, ncol = 6) # Recall (Power)
+
+# Performances matrice computed on the top 5O hits in the association studies 
+f1_6 <- matrix(NA, nrow = nb, ncol = 6)
+preci_6 <- matrix(NA, nrow = nb, ncol = 6)
+recal_6 <- matrix(NA, nrow = nb, ncol = 6)
+
+# Performance matrices computed on the top 75 hits in the association studies  
+f1_7 <- matrix(NA, nrow = nb, ncol = 6)
+preci_7 <- matrix(NA, nrow = nb, ncol = 6)
+recal_7 <- matrix(NA, nrow = nb, ncol = 6)
+
+# Performance matrices computed on the top 100 hits in the association studies 
+f1_8 <- matrix(NA, nrow = nb, ncol = 6)
+preci_8 <- matrix(NA, nrow = nb, ncol = 6)
+recal_8 <- matrix(NA, nrow = nb, ncol = 6)
+```
+
+## Creating simulated data sets and evaluating methods 
+
+For each simulated dataset, we performed association analyses using six methods: sparse lfmm, bslmm, lasso regression, ridge lfmm, cate and sva. All methods except bslmm are implemented in R, and bslmm (see **Estimation algorithms** in the text). For each method, we computed the following performance measures: F1-score, precision and recall.
+
+
+```{r}
+for (j in 1:nrow(para)) {
+  
+  # create a reference set for all markers
+  ref.set <- naturalgwas::create_refset(chrpos, window = 101)
+  
+  # create coufounder effects 
+  confounder <- naturalgwas::create_factor(genotype, K = k)
+
+  # simulate genotypes with the package naturalgwas
+  sim <- naturalgwas::simu_pheno(genotype, confounder, ref.set = ref.set,
+                    ncausal = n.causal, effect.size = para$eff[j], gxe = para$gxe[j])
+    
+  # sparse lfmm regression
+  slf <- lfmm::lfmm_lasso(Y = genotype, X = sim$phenotype, K = k, nozero.prop = pc)$B
+
+  # bslmm gemma
+  # Warning: gemma is not an R package
+  map.e <- data.frame(a = 1:ncol(genotype), b =  1:ncol(genotype), chr = rep(1, ncol(genotype)))
+  bslmm <- gemma2(geno = genotype, pheno = matrix(sim$phenotype), map = map.e, covar =  NULL, 
+                  gemma.exe = "./../gemma.macosx", 
+                  opt.mat = 1, met.reg = "bslmm", lmm = "4", bslmm = "1", 
+                  pmin = pc/100, pmax = pc/10)
+  bsl <- rep(0,ncol(genotype))
+  bsl[bslmm$rs] <- bslmm$beta
+
+  # lasso regression from the glmnet package
+  cvfit = glmnet::cv.glmnet(x = genotype, y = sim$phenotype)
+  a <- coef(cvfit, s = cvfit$lambda.1se) 
+  b <- data.frame(a@i, a@x)[-1,] # remove intercept
+  las <- rep(0, p)
+  las[b[,1]] <- b[,2]
+
+  # lfmm ridge regression
+  rlf <- lfmm::lfmm_ridge(Y = genotype, X = sim$phenotype, K = k)$B
+
+  #  cate 
+  cat <- cate::cate(genotype ~ sim$phenotype, X.data = data.frame(sim$phenotype), Y = genotype, r = k)$beta
+
+  # sva
+  mod <- model.matrix(~ sim$phenotype)
+  mod0 <- model.matrix(~ 1, data = data.frame(sim$phenotype))
+  svobj <- sva::sva(t(genotype), mod, mod0, n.sv = k)
+  modSv <- cbind(mod, svobj$sv)
+  # linear model between exposure and the matrix of genetic markers (with latent variable estimate with sva)
+  sva <- apply(genotype, 2, function(x) summary(lm(x ~ modSv[,-1]))$coefficients[2, 1])
+    
+  # set of causal markers
+  causal <- sim$causal.set
+
+# Computation of F1 score, precision & recall
+# hit are positive within a window of 10Kb around a causal marker
+# which corresponds to LD (r2) min = 0.2
+
+# Performance statistics (F1-score, precision and recall) 
+# computed on the top 25 hits  
+# See details of function F1.LD2 in "function.R"
+  a.slf <- F1.LD2(slf, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 25)
+  a.bsl <- F1.LD2(bsl, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 25)
+  a.las <- F1.LD2(las, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 25)
+  a.rlf <- F1.LD2(rlf, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 25)
+  a.cat <- F1.LD2(cat, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 25)
+  a.sva <- F1.LD2(sva, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 25)
+
+#Data
+  f1_5[j,] <- c(a.slf$f1, a.bsl$f1, a.las$f1, a.rlf$f1, a.cat$f1, a.sva$f1)
+  preci_5[j,] <- c(a.slf$precision, a.bsl$precision, a.las$precision, 
+                   a.rlf$precision, a.cat$precision, a.sva$precision)
+  recal_5[j,] <- c(a.slf$recall, a.bsl$recall, a.las$recall, a.rlf$recall, a.cat$recall, a.sva$recall)
+    
+# Performance statistics (F1-score, precision and recall) 
+# computed on the top 50 hits 
+  a.slf <- F1.LD2(slf, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 50)
+  a.bsl <- F1.LD2(bsl, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 50)
+  a.las <- F1.LD2(las, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 50)
+  a.rlf <- F1.LD2(rlf, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 50)
+  a.cat <- F1.LD2(cat, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 50)
+  a.sva <- F1.LD2(sva, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 50)
+
+# data
+  f1_6[j,] <- c(a.slf$f1, a.bsl$f1, a.las$f1, a.rlf$f1, a.cat$f1, a.sva$f1)
+  preci_6[j,] <- c(a.slf$precision, a.bsl$precision, a.las$precision, 
+                   a.rlf$precision, a.cat$precision, a.sva$precision)
+  recal_6[j,] <- c(a.slf$recall, a.bsl$recall, a.las$recall, a.rlf$recall, a.cat$recall, a.sva$recall)
+    
+# Performance statistics (F1-score, precision and recall) 
+# computed on the top 75 hits  
+  a.slf <- F1.LD2(slf, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 75)
+  a.bsl <- F1.LD2(bsl, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 75)
+  a.las <- F1.LD2(las, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 75)
+  a.rlf <- F1.LD2(rlf, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 75)
+  a.cat <- F1.LD2(cat, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 75)
+  a.sva <- F1.LD2(sva, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 75)
+
+# data
+  f1_7[j,] <- c(a.slf$f1, a.bsl$f1, a.las$f1, a.rlf$f1, a.cat$f1, a.sva$f1)
+  preci_7[j,] <- c(a.slf$precision, a.bsl$precision, a.las$precision, 
+                   a.rlf$precision, a.cat$precision, a.sva$precision)
+  recal_7[j,] <- c(a.slf$recall, a.bsl$recall, a.las$recall, a.rlf$recall, a.cat$recall, a.sva$recall)
+
+# Performance statistics (F1-score, precision and recall) 
+# computed on the top 100 hits 
+  a.slf <- F1.LD2(slf, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 100)
+  a.bsl <- F1.LD2(bsl, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 100)
+  a.las <- F1.LD2(las, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 100)
+  a.rlf <- F1.LD2(rlf, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 100)
+  a.cat <- F1.LD2(cat, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 100)
+  a.sva <- F1.LD2(sva, geno = genotype, poschr = chrpos$pos, causal = causal, nb.hit = 100)
+
+# data
+  f1_8[j,] <- c(a.slf$f1, a.bsl$f1, a.las$f1, a.rlf$f1, a.cat$f1, a.sva$f1)
+  preci_8[j,] <- c(a.slf$precision, a.bsl$precision, a.las$precision, 
+                   a.rlf$precision, a.cat$precision, a.sva$precision)
+  recal_8[j,] <- c(a.slf$recall, a.bsl$recall, a.las$recall, a.rlf$recall, a.cat$recall, a.sva$recall)
+
+    
+  print(paste0("=============="))
+  print(paste0("============== ", j / nrow(f1_5) * 100, " %"))
+  print(paste0("=============="))
+
+}
+
+# Performance statistics (F1-score, precision and recall) 
+# computed on the top 25 hits 
+
+colnames(f1_5) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+colnames(preci_5) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+colnames(recal_5) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+
+f1_5 <- data.frame(para, f1_5)
+preci_5 <- data.frame(para, preci_5)
+recal_5 <- data.frame(para, recal_5)
+
+# Performance statistics (F1-score, precision and recall) 
+# computed on the top 50 hits
+
+colnames(f1_6) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+colnames(preci_6) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+colnames(recal_6) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+
+f1_6 <- data.frame(para, f1_6)
+preci_6 <- data.frame(para, preci_6)
+recal_6 <- data.frame(para, recal_6)
+
+# Performance statistics (F1-score, precision and recall) 
+# computed on the top 75 hits
+
+colnames(f1_7) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+colnames(preci_7) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+colnames(recal_7) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+
+f1_7 <- data.frame(para, f1_7)
+preci_7 <- data.frame(para, preci_7)
+recal_7 <- data.frame(para, recal_7)
+
+# Performance statistics (F1-score, precision and recall) 
+# computed on the top 100 hits 
+
+colnames(f1_8) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+colnames(preci_8) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+colnames(recal_8) <- c("sparse_lfmm", "bslmm", "lasso", "ridge_lfmm", "cate", "sva")
+
+f1_8 <- data.frame(para, f1_8)
+preci_8 <- data.frame(para, preci_8)
+recal_8 <- data.frame(para, recal_8)
+
+
+```
+
+# Script for Figure 3
+
+
+Figure 3 describes the F-score and the precision as a function of effect size of causal markers and strength of the interaction between genotype and environment (G × E) for empirical simulation data.  Three sparse methods (sparse LFMM, BSLMM and LASSO) and three non-sparse methods (ridge LFMM, CATE and SVA) were compared.
+
+
+The following combinations of simulation parameters were explored: (A) Lower effect sizes and lower G × E, (B) Lower effect sizes and higher G × E, (C) Higher effect sizes and lower G × E, (D) Higher effect sizes and higher G × E.
+
+```{r}
+# Performance statistics (F1-score, precision and recall) 
+# computed on the top 100 hits of the association studies  
+dat <- rbind(cbind(f1_8, stat = "F1 SCORE"),
+               cbind(recal_8, stat = "RECALL"),
+               cbind(preci_8, stat = "PRECISION"))
+
+dat <- melt(dat, id.vars = c(1:2, 9))
+
+# GxE parameter transformed as factor
+# 0.1 --> Low GxE
+# 0.9 --> High GxE
+dat$gxe <- as.factor(dat$gxe)
+levels(dat$gxe) <- c("LOW GxE", "HIGH GxE")
+
+# Effect size transformed as factor
+# 6 --> Low EFFECT SIZE
+# 9 --> High EFFECT SIZE
+dat$eff <- as.factor(dat$eff)
+levels(dat$eff) <- c("LOW \n EFFECT \n SIZE", "HIGH \n EFFECT \n SIZE")
+
+levels(dat$variable) <- c("Sparse \n LFMM", "BSLMM", "LASSO", "Ridge \n LFMM", "CATE", "SVA")
+
+# Summarize the results
+dat_mean <- dat %>%
+  group_by(variable, eff, gxe, stat) %>%
+  summarize(mean = mean(value, na.rm = TRUE),
+            sd = sd(value, na.rm = TRUE))
+
+
+filter(dat_mean, 
+       stat != "RECALL") %>%
+  ggplot(., aes(variable, mean, fill = stat)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd),
+                width = 0.5, position = position_dodge(0.9)) +
+  facet_grid(eff ~ gxe, scales = "free_x") +
+  xlab("INTENSITY OF CONFOUNDING") +
+  ylab("STATISTICS") +
+  labs(fill = NULL) +
+  theme_bw() +
+  theme(strip.text.x = element_text(size = 10, face = "bold", angle = 0),
+        strip.text.y = element_text(size = 10, face = "bold", angle = 0),
+        strip.background = element_rect(fill = "white"),
+        axis.title.y = element_text(size = 15, face = "bold"),
+        axis.text.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(size = 14, angle = 0),
+        axis.title.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom")+
+  scale_fill_manual(values = c("black", "grey"))
+```

@@ -1,0 +1,287 @@
+---
+title: "Generative model simulations"
+output: html_document
+---
+# Loading some packages and additional scripts
+```{r}
+source("function.R")
+library(lfmm)
+library(cate)
+library(glmnet)
+library(sva)
+library(tidyverse)
+library(reshape2)
+```
+
+#  Running generative simulations
+
+This section reproduces the experiments described in section "Generative simulation experiments" of the manuscript. Generative simulations are based on the generative model of LFMM, explained in the main text equation (1).
+
+## Loading the data and setting simulation parameters
+
+Here we define the parameters used in the simulations. 
+
+```{r}
+# Number of individuals
+n <- 400
+# n <- 1000
+
+# Number of genetic markers
+p <- 500 
+# p <- 20000 # warning, take a longer time to run
+
+# Number of latent factors
+k <- 6
+
+# Number of causal genetic markers
+nc <- 80 
+
+# Proportion of causal markers
+pc <- nc/p
+
+# Evaluated simulation parameters
+# Proportion of exposure variance explained by latent structure
+# also defined as 'intensity of confounding'
+prv <- rep(c(0.1, 0.5), 3)
+# prv <- rep(seq(0.1, 0.7, 0.2), 200)
+
+# mean of effect sizes for causal markers
+eff <- c(0.75, 1.5)
+
+para <- expand.grid(prv, eff)
+colnames(para) <- c("prop_var", "eff")
+
+# Number of simulations
+nb <- nrow(para)
+
+# Performance matrices
+# F1-score
+f1 <- matrix(NA, nrow = nb, ncol = 5)
+
+# Root Mean Square Error computed on all markers
+rmse <- matrix(NA, nrow = nb, ncol = 6)
+
+# Root Mean Square Error computed on causal markers
+rmse.c <- matrix(NA, nrow = nb, ncol = 5)
+
+# Precision (1 - False Discovery Rate)
+preci <- matrix(NA, nrow = nb, ncol = 5)
+
+# Recall (Power)
+recal <- matrix(NA, nrow = nb, ncol = 5)
+```
+
+## Creating simulated data sets and evaluating methods 
+
+For each simulated dataset, we performed association analyses using six methods: sparse lfmm, bslmm, lasso regression, ridge lfmm, cate and sva. All methods except bslmm are implemented in R, and bslmm (see **Estimation algorithms** in the text). 
+
+For each method, we computed the following performance measures: F1-score, precision and recall.
+
+
+```{r}
+for (j in 1:nrow(para)) {
+  
+# Create simulated data 
+    kr <- 4
+    simu <- simulator_ewas(n = n, p = p, K = k + kr, prop.causal = pc, 
+                           prop.variance = para$prop_var[j], mean.A = para$eff[j], 
+                           sd.V = 1, sd.U = c(runif(k, 2, 6), runif(kr, 0, 1)))
+
+    # get the subset of causal markers
+    causal <- simu$causal
+
+# For each method, record association values (effect sizes, B)
+    
+    # sparse lfmm
+    slf <- lfmm::lfmm_lasso(Y = simu$Y, X = simu$X, K = k, nozero.prop = pc)$B
+
+    # lasso from glmnet package
+    cvfit <- glmnet::cv.glmnet(x = simu$Y, y = simu$X)
+    a <- coef(cvfit, s = cvfit$lambda.1se) 
+    b <- data.frame(a@i, a@x)[-1,] # remove intercept
+    las <- rep(0, p)
+    las[b[,1]] <- b[,2]
+
+    # lfmm ridge
+    rlf <- lfmm::lfmm_ridge(Y = simu$Y, X = simu$X, K = k)$B
+
+    # cate 
+    cat <- cate::cate.fit(X.primary = simu$X, Y = simu$Y, r = k)$beta
+
+    # sva
+    mod <- model.matrix(~ simu$X)
+    mod0 <- model.matrix(~ 1, data = data.frame(simu$X))
+    svobj <- sva::sva(t(simu$Y), mod, mod0, n.sv = k)
+    modSv <- cbind(mod, svobj$sv)
+    sva <- apply(simu$Y, 2, function(x) summary(lm(x ~ modSv[,-1]))$coefficients[2, 1])
+    
+ 
+# Compute F1 score, precision and recall
+    a.slf <- F1(slf, causal, nb.hit = 100)
+    a.las <- F1(las, causal, nb.hit = 100)
+    a.rlf <- F1(rlf, causal, nb.hit = 100)
+    a.cat <- F1(cat, causal, nb.hit = 100)
+    a.sva <- F1(sva, causal, nb.hit = 100)
+    
+# Compute RMSE 
+    r.slf <- RMSE(slf, simu$A)
+    r.las <- RMSE(las, simu$A)
+    r.rlf <- RMSE(rlf, simu$A)
+    r.cat <- RMSE(cat, simu$A)
+    r.sva <- RMSE(sva, simu$A)
+    r.zer <- RMSE(rep(0, p), simu$A)
+    
+# Compute RMSE on causal markers
+    rc.slf <- RMSE(slf[causal], simu$A[causal])
+    rc.las <- RMSE(las[causal], simu$A[causal])
+    rc.rlf <- RMSE(rlf[causal], simu$A[causal])
+    rc.cat <- RMSE(cat[causal], simu$A[causal])
+    rc.sva <- RMSE(sva[causal], simu$A[causal])
+
+# Record results
+    # F1-score
+    f1[j,] <- c(a.slf$f1, a.las$f1, a.rlf$f1, a.cat$f1, a.sva$f1)
+    
+    # Precision
+    preci[j,] <- c(a.slf$precision, a.las$precision,a.rlf$precision, a.cat$precision, a.sva$precision)
+    
+    # Recall
+    recal[j,] <- c(a.slf$recall, a.las$recall, a.rlf$recall, a.cat$recall, a.sva$recall)
+    
+    # Root Mean Square Error computed on all markers
+    rmse[j,] <- c(r.slf, r.las, r.rlf, r.cat, r.sva, r.zer)
+    
+    # Root Mean Square Error computed on causal markers
+    rmse.c[j,] <- c(rc.slf, rc.las, rc.rlf, rc.cat, rc.sva)
+    
+    print(paste0("=============="))
+    print(paste0("============== ", j / nrow(rmse) * 100, " %"))
+    print(paste0("=============="))
+
+}
+
+# Format results
+colnames(rmse) <- c("sparse_lfmm", "lasso", "ridge_lfmm", "cate", "sva", "zero")
+colnames(rmse.c) <- c("sparse_lfmm", "lasso", "ridge_lfmm", "cate", "sva")
+colnames(f1) <- c("sparse_lfmm", "lasso", "ridge_lfmm", "cate", "sva")
+colnames(preci) <- c("sparse_lfmm", "lasso", "ridge_lfmm", "cate", "sva")
+colnames(recal) <- c("sparse_lfmm", "lasso", "ridge_lfmm", "cate", "sva")
+
+rmse <- data.frame(para, rmse)
+rmse.c <- data.frame(para, rmse.c)
+f1 <- data.frame(para, f1)
+preci <- data.frame(para, preci)
+recal <- data.frame(para, recal)
+
+# res <- list(f1 = f1, rmse = rmse, preci = preci, recal = recal, rmse.c = rmse.c)
+```
+
+# Script for Figure 1
+
+Figure 1 describes the Root Mean Square Error (RMSE) as a function of the effect size of causal markers and confounding intensity. Two sparse methods (sparse LFMM, LASSO) and three non-sparse methods (ridge LFMM, CATE and SVA) were compared. The “Zero” value corresponds to an RMSE obtained with all effect sizes set to zero (null-model error). 
+
+The following combinations of simulation parameters were explored: (A) Lower effect sizes and confounding intensities, (B) Lower effect sizes and higher confounding intensities, (C) Higher effect sizes and lower confounding intensities, (D) Higher effect sizes and confounding intensities.
+
+```{r}
+rmse <- melt(rmse, id.vars = 1:2)
+# Confounding intensity transformed as a factor
+# 0.1 --> Low Proportion of variance
+# 0.5 --> High Proportion of variance
+rmse$prop_var <- as.factor(rmse$prop_var)
+levels(rmse$prop_var) <- c("LOW \n CONFOUNDING", "HIGH \n CONFOUNDING")
+
+# Effect size transformed as a factor
+# 0.75 --> Low EFFECT SIZE
+# 1.5 --> High EFFECT SIZE
+rmse$eff <- as.factor(rmse$eff)
+levels(rmse$eff) <- c("LOW \n EFFECT \n SIZE", "HIGH \n EFFECT \n SIZE")
+levels(rmse$variable) <- c("Sparse \n LFMM", "LASSO", "Ridge \n LFMM", "CATE", "SVA", "Zero")
+
+# Summarize the results
+dat_mean <- rmse %>%
+  group_by(variable, eff, prop_var) %>%
+  summarize(mean = mean(value, na.rm = TRUE),
+            sd = sd(value, na.rm = TRUE))
+
+# plot the results
+ggplot(dat_mean, aes(variable, mean, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd),
+                width = 0.5, position = position_dodge(0.9)) +
+  facet_grid(eff ~ prop_var, scales = "free_x") +
+  xlab("INTENSITY OF CONFOUNDING") +
+  ylab("RMSE") +
+  labs(fill = "METHODS") +
+  theme_bw()+
+  theme(strip.text.x = element_text(size = 10, face = "bold", angle = 0),
+        strip.text.y = element_text(size = 10, face = "bold", angle = 0),
+        strip.background = element_rect(fill = "white"),
+        axis.title.y = element_text(size = 15, face = "bold"),
+        axis.text.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(size = 14),
+        axis.title.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "none")+
+  scale_fill_manual(values = c("orange", "purple", "blue", "green", "yellow", "black"))
+
+```
+
+
+# Script for Figure 2
+
+Figure 2 describes the F-score and the precision as a function of effect size of causal markers and confounding intensity. Two sparse methods (sparse LFMM, LASSO) and three non-sparse methods (ridge LFMM, CATE and SVA) were compared. 
+
+The following combinations of simulation parameters were explored: (A) Lower effect sizes and confounding intensities, (B) Lower effect sizes and higher confounding intensities, (C) Higher effect sizes and lower confounding intensities, (D) Higher effect sizes and confounding intensities.
+
+```{r}
+dat <- rbind(cbind(f1, stat = "F1 SCORE"),
+             cbind(recal, stat = "RECALL"),
+             cbind(preci, stat = "PRECISION"))
+
+dat <- melt(dat, id.vars = c(1:2, 8))
+
+# confounding intensity transformed as factor
+# 0.1 --> Low Proportion of variance
+# 0.5 --> High Proportion of variance
+dat$prop_var <- as.factor(dat$prop_var)
+levels(dat$prop_var) <- c("LOW \n CONFOUNDING", "HIGH \n CONFOUNDING")
+
+# Effect size transformed asfactor
+# 0.75 --> Low EFFECT SIZE
+# 1.5 --> High EFFECT SIZE
+dat$eff <- as.factor(dat$eff)
+levels(dat$eff) <- c("LOW \n EFFECT \n SIZE", "HIGH \n EFFECT \n SIZE")
+levels(dat$variable) <- c("Sparse \n LFMM", "LASSO", "Ridge \n LFMM", "CATE", "SVA")
+
+# Summarize and plot the results
+dat_mean <- dat %>%
+  group_by(variable, eff, prop_var, stat) %>%
+  summarize(mean = mean(value, na.rm = TRUE),
+            sd = sd(value, na.rm = TRUE))
+
+filter(dat_mean, stat != "RECALL") %>%
+  ggplot(., aes(variable, mean, fill = stat)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd),
+                width = 0.5, position = position_dodge(0.9)) +
+  facet_grid(eff ~ prop_var, scales = "free_x") +
+  xlab("INTENSITY OF CONFOUNDING") +
+  ylab("STATISTICS") +
+  labs(fill = NULL) +
+  theme_bw()+
+  theme(strip.text.x = element_text(size = 10, face = "bold", angle = 0),
+        strip.text.y = element_text(size = 10, face = "bold", angle = 0),
+        strip.background = element_rect(fill = "white"),
+        axis.title.y = element_text(size = 15, face = "bold"),
+        axis.text.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(size = 14, angle = 0),
+        axis.title.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom") +
+  #scale_fill_manual(values = c("orange", "yellow", "blue", "green", "purple", "black")) +
+  scale_fill_manual(values = c("black", "grey")) +
+  scale_y_continuous(limits = c(0, 1))
+```
+
