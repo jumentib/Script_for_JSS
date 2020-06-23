@@ -44,7 +44,7 @@ rm(arabidopsis.chr5.atwell.ft16)
 
 # Performing association studies for the flowering time phenotype.
 
-We carried out genomewide association studies (GWAS) between *Arabidopsis thaliana* genotypes and flowering time phenotypes (FT16). GWAS were performed with 6 different methods: sparse lfmm, bslmm, lasso, ridge lfmm, cate and sva.
+We carried out genome-wide association studies (GWAS) between *Arabidopsis thaliana* genotypes and flowering time phenotypes (FT16). GWAS were performed with 6 different methods: sparse lfmm, bslmm, lasso, ridge lfmm, cate and sva.
 
 ```{r}
 # Set the number of latent factors for several methods (based on a prior PCA)
